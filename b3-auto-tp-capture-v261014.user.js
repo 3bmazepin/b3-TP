@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         b3 自動TP鹵獲
 // @namespace    b3-auto-tp-capture
-// @version      v6.24
+// @version      v261014
 // @description  自動TP鹵獲
 // @match        https://*.3gokushi.jp/village.php*
 // @match        https://*.3gokushi.jp/card/deck.php*
