@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         bro3 自動TP鹵獲 v0.6.24
-// @namespace    bro3-auto-tp-capture
-// @version      0.6.24
-// @description  自動TP鹵獲（全通常デッキ拠点の武将を取得）
+// @name         b3 自動TP鹵獲
+// @namespace    b3-auto-tp-capture
+// @version      v6.24
+// @description  自動TP鹵獲
 // @match        https://*.3gokushi.jp/village.php*
 // @match        https://*.3gokushi.jp/card/deck.php*
 // @grant        none
