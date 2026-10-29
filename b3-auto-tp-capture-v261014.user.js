@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         b3 自動TP鹵獲
-// @namespace    b3-auto-tp-capture
-// @version      v261014
-// @description  自動TP鹵獲
+// @name         bro3 自動TP鹵獲v
+// @namespace    bro3-auto-tp-capture
+// @version      7.0
+// @description  自動TP鹵獲（全通常デッキ拠点の武将を取得）
 // @match        https://*.3gokushi.jp/village.php*
 // @match        https://*.3gokushi.jp/card/deck.php*
 // @grant        none
@@ -276,7 +276,7 @@ panel.style.left=`${x}px`;
 panel.style.top=`${y}px`;
 panel.innerHTML=`
 <div id="bro3-tp-title">
- 自動TP鹵獲 <span style="font-size:11px">v0.6.24</span>
+ 自動TP鹵獲 <span style="font-size:11px">v7.0</span>
  <button id="bro3-tp-collapse">－</button>
 </div>
 <div id="bro3-tp-body">
@@ -602,11 +602,19 @@ if(el!==card&&el.getAttribute('data-cost')===null&&el.getAttribute('data-card-co
 }
 return resolve(values);
 }
+function isRecoverySkillReady(sk){
+if(String(sk.freeze_flg??'').trim()!=='0')return false;
+if(sk.effective_time!==undefined&&String(sk.effective_time).trim()!=='0')return false;
+const raw=String(sk.recovery_time??'').trim();
+if(!raw)return true;
+const parts=raw.match(/\d+(?:\.\d+)?/g);return !!parts&&parts.every(n=>Number(n)===0);
+}
 const excludedRecoveryCards=new Set();
+const recoverySkillKey=(card,skill)=>String(card.cardId)+':'+String(skill.skill_id);
 async function getRecoveryCandidates(labelId){
 const found=new Map();
 for(let page=1;page<=20;page++){
-const html=await getHTML(`/card/deck.php?p=${page}&l=${encodeURIComponent(labelId)}`);
+const html=await getHTML(`/card/deck.php?deck_mode=1&p=${page}&l=${encodeURIComponent(labelId)}`);
 const doc=toDoc(html);
 const cards=[...doc.querySelectorAll(
 '#cardFileList div.cardStatusDetail.label-setting-mode, '+
@@ -616,7 +624,7 @@ if(!cards.length)break;
 let added=0;
 for(const card of cards){
 const cardId=findCardId(card);
-if(!cardId||found.has(cardId)||excludedRecoveryCards.has(String(cardId)))continue;
+if(!cardId||found.has(cardId))continue;
 const cost=findRecoveryCardCost(card);
 if(!Number.isFinite(cost)||cost<=0)continue;
 const query=findSkillQuery(card);
@@ -624,13 +632,13 @@ const skills=parseSkillListQuery(query);
 if(!skills.length)continue;
 const usable=skills.filter(sk=>
 sk.card_id&&sk.skill_id&&
-String(sk.freeze_flg??'0')==='0'
+isRecoverySkillReady(sk)&&!excludedRecoveryCards.has(recoverySkillKey({cardId},sk))
 );
 const hpHeal=usable.find(sk=>isHpRecoverySkill(sk.skill_name));
 const keikoku=usable.find(sk=>isKeikoku(sk.skill_name));
 if(hpHeal||keikoku){
 found.set(cardId,{
-cardId,cost,
+cardId,cost,page,labelId,
 name:findCardName(card)||`ID:${cardId}`,
 hpHeal:hpHeal||null,
 keikoku:keikoku||null
@@ -646,8 +654,11 @@ if(!hasNext)break;
 }
 return[...found.values()];
 }
-async function getRecoveryVillageId(){
-const html=await getHTML('/card/deck.php');
+let recoveryPlan=null,recoveryVillageReady='';
+function resetRecoveryPlan(){recoveryPlan=null;recoveryVillageReady='';}
+async function getRecoveryVillageId(minCost=1){
+if(recoveryPlan){if(recoveryPlan.vacantCost<Math.max(1,minCost))throw new Error('必要な空きデッキコストがありません');return recoveryPlan;}
+const html=await getHTML('/card/deck.php?deck_mode=1');
 const doc=toDoc(html);
 const raw=(doc.querySelector('#villages')?.textContent||'').trim();
 if(!raw)throw new Error('ビヨンド式の拠点一覧 #villages が取得できません（安全停止）');
@@ -662,29 +673,23 @@ catch(_){throw new Error('拠点一覧の解析に失敗（安全停止）');}
 }
 const entries=Object.values(villages||{}).filter(v=>v&&typeof v==='object');
 const vacant={1:0,2:0};
-doc.querySelectorAll('#cardListDeck .deck_tab .state span.volume').forEach(el=>{
+const deck=doc.querySelector('#cardListDeck .deck_tab');
+if(!deck)throw new Error('通常デッキの空きコスト表示が取得できません');
+deck.querySelectorAll('.state span.volume').forEach(el=>{
 const kind=Number(el.getAttribute('data-deck-kind')||el.dataset?.deckKind);
 const m=(el.textContent||'').match(/([\d.]+)\s*\/\s*([\d.]+)/);
 if((kind===1||kind===2)&&m)vacant[kind]=Math.max(0,Number(m[2])-Number(m[1]));
 });
-const first={1:null,2:null};
-for(const v of entries){
-const kind=Number(v.deck_kind);
-const id=String(v.village_id||'');
-if((kind===1||kind===2)&&/^\d+$/.test(id)&&
-(v.isset_domestic===false||v.isset_domestic===0||v.isset_domestic==='0')&&!first[kind]){
-first[kind]=id;
-}
-}
 if(Math.max(vacant[1],vacant[2])<1)throw new Error('必要な空きデッキコストがありません');
-const possible=[1,2].filter(kind=>first[kind]&&vacant[kind]>=1);
+const possible=entries.map(v=>({villageId:String(v.village_id||''),deckKind:Number(v.deck_kind),domestic:v.isset_domestic})).filter(v=>[1,2].includes(v.deckKind)&&/^\d+$/.test(v.villageId)&&[false,0,'0'].includes(v.domestic)&&vacant[v.deckKind]>=Math.max(1,minCost));
+possible.sort((a,b)=>vacant[b.deckKind]-vacant[a.deckKind]||a.deckKind-b.deckKind);
 if(!possible.length){
-console.warn('[自動TP] 回復用拠点候補なし',{vacant,first,villageCount:entries.length});
-throw new Error('内政官不在かつ空きコストのある回復用拠点がありません（安全停止）');
+const main=entries.filter(v=>Number(v.deck_kind)===1);
+const mainOccupied=main.some(v=>[true,1,'1'].includes(v.isset_domestic));
+const message=vacant[1]>=Math.max(1,minCost)&&mainOccupied?'本拠地に内政官が配置されており、回復スキルを発動できる城壁塔がありません（城壁塔が未作成、または内政官配置中）。停止します':'内政官不在かつ必要な空きコストのある回復用拠点がありません';
+const error=new Error(message);error.noRecoveryOrigin=true;throw error;
 }
-possible.sort((a,b)=>vacant[b]-vacant[a]||a-b);
-const kind=possible[0],villageId=first[kind];
-return{villageId,deckMode:kind,vacantCost:vacant[kind]};
+const origin=possible[0];recoveryPlan={villageId:origin.villageId,deckKind:origin.deckKind,deckMode:1,vacantCost:vacant[origin.deckKind]};return recoveryPlan;
 }
 async function postForm(url,params){
 const body=new URLSearchParams();
@@ -703,10 +708,21 @@ function recoveryWaitMs(id,def){
 const v=Number(document.getElementById(id)?.value);
 return Math.round((Number.isFinite(v)?v:def)*1000);
 }
+function readRecoverySkillCooldown(doc,card,skill){
+const values=[];
+for(const box of doc.querySelectorAll('#cardFileList div.cardStatusDetail.label-setting-mode')){
+if(String(findCardId(box))!==String(card.cardId))continue;
+for(const sk of parseSkillListQuery(findSkillQuery(box))){
+if(String(sk.card_id)!==String(skill.card_id)||String(sk.skill_id)!==String(skill.skill_id))continue;
+const flag=String(sk.freeze_flg??'');if(/^\d+$/.test(flag))values.push(Number(flag)!==0);
+}
+}
+return values.length&&values.every(Boolean)?true:values.length&&values.every(v=>!v)?false:null;
+}
 async function attemptRecoverySkill(card,skill,origin){
 const{villageId,deckMode,vacantCost}=origin;
 if(!Number.isFinite(vacantCost)||vacantCost<1)throw new Error('必要な空きデッキコストがありません');
-if(![1,2].includes(deckMode)||!/^\d+$/.test(String(villageId)))throw new Error('回復拠点を確認できません');
+if(deckMode!==1||!/^\d+$/.test(String(villageId)))throw new Error('回復拠点を確認できません');
 if(!Number.isFinite(card.cost)||card.cost<=0||card.cost>vacantCost)throw new Error('回復武将が空きデッキコストに収まりません');
 if(!skill?.skill_id)throw new Error(`${card.name}: スキルIDがありません`);
 if(!skill?.card_id)throw new Error(`${card.name}: スキル側card_idがありません`);
@@ -717,7 +733,9 @@ const params={
 ssid,
 target_card:targetCardId,
 mode:'domestic_set',
-deck_mode:deckMode,
+p:card.page||1,
+l:card.labelId??document.getElementById('bro3-tp-heal-label')?.value??'0',
+deck_mode:1,
 action_type:2,
 'choose_attr1_skills[]':skill.skill_id
 };
@@ -725,12 +743,13 @@ params[`selected_village[${targetCardId}]`]=villageId;
 const html=await postForm('/card/deck.php',params);
 const d=toDoc(html);
 const err=normalizeText(
-d.querySelector('.error, .errorMessage, .notice-error, #error, .red')?.textContent||''
+d.querySelector('.error, .errorMessage, .notice-error, #error')?.textContent||''
 );
 const responseText=normalizeText(d.body?.textContent||'').slice(0,600);
 if(err&&/(エラー|できません|失敗|不足|使用でき|発動でき)/.test(err)){
 throw new Error(`${skill.skill_name}: ${err.slice(0, 120)}`);
 }
+if(readRecoverySkillCooldown(d,card,skill)===true)return;
 await sleep(recoveryWaitMs('bro3-tp-skill-wait',DEFAULT_SKILL_WAIT));
 const latest=await getRecoveryCandidates(document.getElementById('bro3-tp-heal-label')?.value||'');
 const same=latest.find(c=>String(c.cardId)===String(card.cardId));
@@ -746,19 +765,24 @@ error.recoveryUnconfirmed=true;throw error;
 }
 async function activateRecoverySkill(card,skill,origin){
 const type=isKeikoku(skill.skill_name)?'keikoku':'hpHeal';
+const tried=new Set();let alternatives=null;
+if(stopRequested)return;
+if(recoveryVillageReady!==origin.villageId){
+setStatus((origin.deckKind===1?'本拠':'拠点')+'デッキの回復拠点へ切替中','work');
+await changeVillage(origin.villageId);recoveryVillageReady=origin.villageId;
+}
 while(!stopRequested){
-try{await attemptRecoverySkill(card,skill,origin);return;}catch(error){
-if(!error.recoveryUnconfirmed)throw error;
-excludedRecoveryCards.add(String(card.cardId));
-setStatus(`${card.name}を回復候補から除外：次の武将を確認中`,'work');
+const key=recoverySkillKey(card,skill);
+if(!excludedRecoveryCards.has(key)&&!tried.has(key)){
+tried.add(key);
+try{await attemptRecoverySkill(card,skill,origin);return;}catch(error){if(!error.recoveryUnconfirmed)throw error;}
+excludedRecoveryCards.add(key);setStatus(card.name+'の該当スキルを除外：次の武将を確認中','work');
 }
 if(stopRequested)return;
-origin=await getRecoveryVillageId();
-const cards=await getRecoveryCandidates(document.getElementById('bro3-tp-heal-label')?.value||'');
-card=cards.find(c=>c[type]&&c.cost<=origin.vacantCost&&!excludedRecoveryCards.has(String(c.cardId)));
-if(!card)throw new Error('除外した武将以外に、空きデッキコストに収まる使用可能な回復武将がありません');
-skill=card[type];
-setStatus(`回復武将を変更：${card.name}`,'work');
+if(!alternatives)alternatives=await getRecoveryCandidates(document.getElementById('bro3-tp-heal-label')?.value||'');
+card=alternatives.find(c=>c[type]&&isRecoverySkillReady(c[type])&&c.cost<=origin.vacantCost&&!tried.has(recoverySkillKey(c,c[type]))&&!excludedRecoveryCards.has(recoverySkillKey(c,c[type])));
+if(!card)throw new Error('空きデッキコストに収まる使用可能な回復スキルがありません');
+skill=card[type];setStatus('回復武将を変更：'+card.name,'work');
 }
 }
 function collectRenderedSubdue(doc,ids){
@@ -939,6 +963,7 @@ return{ok:false,limit:false,message:explicit.slice(0,160)};
 return{ok:true,limit:false,message:''};
 }
 async function sendCapture(cardId,villageId,x,y){
+resetRecoveryPlan();
 await changeVillage(villageId);
 const params={
 village_x_value:x,
@@ -1103,7 +1128,7 @@ const firstWait=Number(document.getElementById('bro3-tp-first-wait').value);
 const recheckWait=Number(document.getElementById('bro3-tp-recheck-wait').value);
 if(![mainX,mainY,subX,subY].every(Number.isFinite)||!selected.length||!labelId||
 !Number.isFinite(firstWait)||firstWait<1||!Number.isFinite(recheckWait)||recheckWait<1)return;
-excludedRecoveryCards.clear();
+excludedRecoveryCards.clear();resetRecoveryPlan();
 stopRequested=false;autoRunning=true;cycleCount=0;
 document.getElementById('bro3-tp-start').disabled=true;
 try{
